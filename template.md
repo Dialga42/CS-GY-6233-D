@@ -517,10 +517,10 @@ signal(semaphore *S) {
 do {
 	wait(empty);
 	wait(mutex);
-	/* add an item to the buffer */ 
+	/* add an item to the buffer */
   counter++;
   signal(mutex);
-  signal(full);/* inc full sem. */ } while (true);
+  signal(full);/* inc full sem. */ 
 } while(true);
 
 // The structure of the consumer process
@@ -554,15 +554,16 @@ do {
 do {
   wait(mutex);
   read_count ++;
-  if (read_count == 1)
+  if (read_count == 1) /* only first reader locks rw_mutex */
     wait(rw_mutex);
   signal(mutex);
   
   /* reading dataset is performed, protected by rw_mutex */
-  
+  /* either one writer, or multiple readers at a time*/
+
   wait(mutex);
   read_count --;
-  if (read_count == 0)
+  if (read_count == 0) /* only last reader unlocks rw_mutex */
     signal(rw_mutex);
   signal(mutex);
 } while (true);
@@ -624,4 +625,152 @@ do {
     }
 } /* end of monitor */
 ```
+## prod_cons_with_sem.c
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <sys/ipc.h>
 
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <sys/shm.h>
+
+#include <semaphore.h>
+
+
+
+#define IN arr[n]
+#define OUT arr[n+1]
+#define N 5
+
+#define SEM_NUM_EMPTY_ENTRIES sem_arr[0]
+#define SEM_NUM_FULL_ENTRIES  sem_arr[1]
+//#define SEM_MUTEX             sem_arr[2]
+
+int fibonacci();
+
+int main(int argc, char *argv[])
+{
+    int pid;
+    int ii;
+    int n;
+    int *arr;
+    sem_t *sem_arr;
+    int fid;
+    
+    	   
+    /* Obtain the sequence size */
+    if (argc == 1) {
+        printf("Usage: ./lab3 <number of elements>\n");		
+        return -1;
+    }
+    n = atoi(argv[1]);
+
+    		
+    /* create the shared memory (open as read only) */
+    fid = shm_open("cs6233", O_CREAT|O_RDWR, 0666);
+    ftruncate(fid, (N+2)*sizeof(int) );
+    /* Get a pointer to that shared memory */
+    arr = mmap(0, (N+2)*sizeof(int), PROT_WRITE, MAP_SHARED, fid,0);
+
+
+    /* create a shared memory holding the 3 semaphores (using anonymous this time for demonstration) */
+    sem_arr = mmap(0, 2*sizeof(sem_t), PROT_WRITE, MAP_SHARED|MAP_ANONYMOUS, -1, 0); // recommended to set fid to -1
+
+    /* Initialize the shared variables */
+    IN=0;
+    OUT=0;
+    sem_init(&SEM_NUM_EMPTY_ENTRIES, 1, N); /* a counting sempaphore initialized to N  (the 1 parameter is to share it bet. processes */
+    sem_init(&SEM_NUM_FULL_ENTRIES , 1, 0); /* a counting sempaphore initialized to 0 */
+//    sem_init(&SEM_MUTEX            , 1, 1); /* as discussed in lects, initialize a semaphore to 1 to use it as a mutex lock */
+    
+    /* create the child process */
+    pid = fork();
+	
+    if(pid==0){ /* child process  - PRODUCER */
+        
+
+        for(ii=0;ii<n;ii++){
+
+            /* wait for random time */
+            usleep(1000* (rand()%1000));
+
+            /* wait for buffer not full */
+            //while( (IN+1)%N == OUT);          
+            sem_wait(&SEM_NUM_EMPTY_ENTRIES); // wait (block, not busy-wait) till number of empty entires is 1 or above 
+
+            /* Write to the array */
+            arr[IN] = fibonacci();
+
+            /* increment the next write index */
+            IN = (IN+1)%N;
+            
+            /* Indicate an increase in the number of full entires (we just used one) */
+            sem_post(&SEM_NUM_FULL_ENTRIES);
+        }
+        
+    }
+    else if(pid>0){ /* parent process - CONSUMER */
+
+        /* print a header */
+        printf("The fibonacci sequence is ");
+
+        for(ii=0;ii<n;ii++){
+            
+            
+            /* wait for buffer not empty */
+            //while( IN == OUT);
+            sem_wait(&SEM_NUM_FULL_ENTRIES);  // wait (block, not busy-wait) till number of full entires is 1 or above
+            
+            /* read and print an entry from the shared buffer */
+            printf("%d ", arr[OUT]);
+            fflush(stdout);
+            
+            /* increment the read index */
+            OUT = (OUT+1)%N;
+            
+            /* Indicate an increase in the number of empty entires (we just consumed one) */
+            sem_post(&SEM_NUM_EMPTY_ENTRIES);
+        }
+        printf("\n");
+        
+        
+        /* wait for child to exit */
+        wait(NULL);
+        
+        /* unmap the shared memory */
+        munmap(arr, N*sizeof(int) );
+        munmap(sem_arr, 2*sizeof(sem_t) );
+
+    }
+	else{
+        printf("Error: fork() failed.. program will exit\n");
+        munmap(arr, N*sizeof(int) );
+        munmap(sem_arr, 2*sizeof(sem_t) );
+        return -1;
+    }
+
+    return 0;
+}
+
+int fibonacci()
+{
+    static int ii=0, outQ=1, outQQ=1;
+    int out;
+    
+    if(ii==0 || ii==1){
+        ii++;
+        out=1;
+    }
+    else{
+        out= outQ + outQQ;
+        outQQ=outQ;
+        outQ=out;
+    }
+    return out;
+}
+```
